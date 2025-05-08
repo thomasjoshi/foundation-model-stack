@@ -163,11 +163,14 @@ parser.add_argument(
     help="Path to output CSV file for benchmark results."
 )
 parser.add_argument(
-    "--benchmark_mode",
-    type=str,
-    default=None,
-    choices=[None, "runtime_vs_seqlen", "memory_vs_seqlen"],
-    help="Special mode for plotting: run runtime or memory vs sequence length for both paged and non-paged."
+    "--run_runtime_vs_seqlen_sweep",
+    action="store_true",
+    help="Run runtime (fwd+bwd) vs sequence length sweep for paged and non-paged, save to CSV, then exit."
+)
+parser.add_argument(
+    "--run_memory_vs_seqlen_sweep",
+    action="store_true",
+    help="Run memory usage vs sequence length sweep for paged and non-paged, save to CSV, then exit."
 )
 
 args = parser.parse_args()
@@ -654,7 +657,25 @@ def memory_vs_seqlen_sweep(tokenizer, device, paged, output_csv, batch_size=1, m
     return results
 
 if __name__ == "__main__":
-    # ... existing code ...
+    # Run sweep and exit if requested
+    if args.run_runtime_vs_seqlen_sweep:
+        if args.output_csv and os.path.exists(args.output_csv):
+            os.remove(args.output_csv)
+        print("Running runtime vs sequence length (non-paged)...")
+        runtime_vs_seqlen_sweep(tokenizer, device, paged=False, output_csv=args.output_csv)
+        print("Running runtime vs sequence length (paged)...")
+        runtime_vs_seqlen_sweep(tokenizer, device, paged=True, output_csv=args.output_csv)
+        print(f"Results written to {args.output_csv}")
+        exit(0)
+    if args.run_memory_vs_seqlen_sweep:
+        if args.output_csv and os.path.exists(args.output_csv):
+            os.remove(args.output_csv)
+        print("Running memory vs sequence length (non-paged)...")
+        memory_vs_seqlen_sweep(tokenizer, device, paged=False, output_csv=args.output_csv)
+        print("Running memory vs sequence length (paged)...")
+        memory_vs_seqlen_sweep(tokenizer, device, paged=True, output_csv=args.output_csv)
+        print(f"Results written to {args.output_csv}")
+        exit(0)
     
     if args.profile_memory:
         profile_memory(model, tokenizer, device, BATCH_SIZE, SEQ_LEN)
@@ -679,23 +700,3 @@ if __name__ == "__main__":
         print(f"P95 Token Latency: {results['latency']['p95_token_latency_ms']:.2f} ms")
         print(f"Average Sequence Latency: {results['latency']['avg_sequence_latency_ms']:.2f} ms")
         print(f"P95 Sequence Latency: {results['latency']['p95_sequence_latency_ms']:.2f} ms")
-
-    if args.benchmark_mode == "runtime_vs_seqlen":
-        # Clear file if exists
-        if args.output_csv and os.path.exists(args.output_csv):
-            os.remove(args.output_csv)
-        print("Running runtime vs sequence length (non-paged)...")
-        runtime_vs_seqlen_sweep(tokenizer, device, paged=False, output_csv=args.output_csv)
-        print("Running runtime vs sequence length (paged)...")
-        runtime_vs_seqlen_sweep(tokenizer, device, paged=True, output_csv=args.output_csv)
-        print(f"Results written to {args.output_csv}")
-        exit(0)
-    if args.benchmark_mode == "memory_vs_seqlen":
-        if args.output_csv and os.path.exists(args.output_csv):
-            os.remove(args.output_csv)
-        print("Running memory vs sequence length (non-paged)...")
-        memory_vs_seqlen_sweep(tokenizer, device, paged=False, output_csv=args.output_csv)
-        print("Running memory vs sequence length (paged)...")
-        memory_vs_seqlen_sweep(tokenizer, device, paged=True, output_csv=args.output_csv)
-        print(f"Results written to {args.output_csv}")
-        exit(0)
