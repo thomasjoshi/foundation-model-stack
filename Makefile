@@ -293,24 +293,16 @@ bench-latency-t4: deps $(TOKENIZER_FILE)
 # Run all attention runtime and memory benchmarks for plotting at specific sequence lengths
 attention-benchmarks: deps $(TOKENIZER_FILE)
 	@rm -f attention_runtime_vs_seqlen.csv attention_memory_vs_seqlen.csv
-	@for SEQ in 128 256 512 1024 2048 4096 8192; do \
-		echo "Running runtime vs sequence length ($$SEQ, paged and non-paged)..."; \
-		CUDA_VISIBLE_DEVICES=0 $(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
-			--architecture=llama --variant=$(LLAMA_VARIANT) \
-			--tokenizer="$(TOKENIZER)" \
-			--seq_len=$$SEQ \
-			--benchmark_mode=runtime_vs_seqlen \
-			--output_csv=attention_runtime_vs_seqlen.csv; \
-	done
-	@for SEQ in 128 256 512 1024 2048 4096 8192; do \
-		echo "Running memory vs sequence length ($$SEQ, paged and non-paged)..."; \
-		CUDA_VISIBLE_DEVICES=0 $(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
-			--architecture=llama --variant=$(LLAMA_VARIANT) \
-			--tokenizer="$(TOKENIZER)" \
-			--seq_len=$$SEQ \
-			--benchmark_mode=memory_vs_seqlen \
-			--output_csv=attention_memory_vs_seqlen.csv; \
-	done
+	CUDA_VISIBLE_DEVICES=0 $(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--run_runtime_vs_seqlen_sweep \
+		--output_csv=attention_runtime_vs_seqlen.csv
+	CUDA_VISIBLE_DEVICES=0 $(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--run_memory_vs_seqlen_sweep \
+		--output_csv=attention_memory_vs_seqlen.csv
 
 # Plot the results
 plot-attention-benchmarks:
