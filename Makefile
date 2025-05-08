@@ -15,6 +15,15 @@ help:
 	@echo "  bench-llama-paged    Benchmark LLaMA $(LLAMA_VARIANT) using paged attention"
 	@echo "  bench-llama-t4       Memory‑friendly LLaMA 7B benchmark for 16 GB T4 GPUs"
 	@echo "  bench-llama-paged-t4 Memory‑friendly paged LLaMA 7B benchmark for 16 GB T4 GPUs"
+	@echo "  bench-throughput-seqlen    Benchmark throughput vs sequence length"
+	@echo "  bench-throughput-batchsize  Benchmark throughput vs batch size"
+	@echo "  bench-latency        Run latency analysis benchmark"
+	@echo "  bench-throughput-seqlen-paged    Benchmark throughput vs sequence length with paged attention"
+	@echo "  bench-throughput-batchsize-paged  Benchmark throughput vs batch size with paged attention"
+	@echo "  bench-latency-paged  Run latency analysis benchmark with paged attention"
+	@echo "  bench-throughput-seqlen-t4    Memory-friendly throughput vs sequence length benchmark"
+	@echo "  bench-throughput-batchsize-t4  Memory-friendly throughput vs batch size benchmark"
+	@echo "  bench-latency-t4     Memory-friendly latency analysis benchmark"
 	@echo "  report           	  Compile final_project/report.tex → PDF"
 	@echo "  report-clean         Remove LaTeX aux files & built PDF"
 	@echo "  clean                Remove virtual environment, cache & stamp file"
@@ -208,4 +217,102 @@ else
 	cd $(REPORT_DIR) && latexmk -C
 endif
 	rm -f $(REPORT_PDF)
+
+# Benchmark targets for detailed analysis
+bench-throughput-seqlen: deps $(TOKENIZER_FILE)
+	@echo "Running throughput vs sequence length benchmark..."
+	CUDA_VISIBLE_DEVICES=0 $(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--seq_len=4096 --batch_size=2 $(EXTRA)
+
+bench-throughput-batchsize: deps $(TOKENIZER_FILE)
+	@echo "Running throughput vs batch size benchmark..."
+	CUDA_VISIBLE_DEVICES=0 $(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--seq_len=1024 --batch_size=32 $(EXTRA)
+
+bench-latency: deps $(TOKENIZER_FILE)
+	@echo "Running latency analysis benchmark..."
+	CUDA_VISIBLE_DEVICES=0 $(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--seq_len=512 --batch_size=1 $(EXTRA)
+
+# Paged attention variants of the benchmarks
+bench-throughput-seqlen-paged: deps $(TOKENIZER_FILE)
+	@echo "Running throughput vs sequence length benchmark with paged attention..."
+	CUDA_VISIBLE_DEVICES=0 FMS_ATTENTION_ALGO=paged \
+		$(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--seq_len=4096 --batch_size=2 $(EXTRA)
+
+bench-throughput-batchsize-paged: deps $(TOKENIZER_FILE)
+	@echo "Running throughput vs batch size benchmark with paged attention..."
+	CUDA_VISIBLE_DEVICES=0 FMS_ATTENTION_ALGO=paged \
+		$(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--seq_len=1024 --batch_size=32 $(EXTRA)
+
+bench-latency-paged: deps $(TOKENIZER_FILE)
+	@echo "Running latency analysis benchmark with paged attention..."
+	CUDA_VISIBLE_DEVICES=0 FMS_ATTENTION_ALGO=paged \
+		$(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--seq_len=512 --batch_size=1 $(EXTRA)
+
+# Memory-friendly variants for T4 GPUs
+bench-throughput-seqlen-t4: deps $(TOKENIZER_FILE)
+	@echo "Running memory-friendly throughput vs sequence length benchmark..."
+	CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+		$(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--seq_len=2048 --batch_size=1 $(T4_EXTRA) $(EXTRA)
+
+bench-throughput-batchsize-t4: deps $(TOKENIZER_FILE)
+	@echo "Running memory-friendly throughput vs batch size benchmark..."
+	CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+		$(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--seq_len=512 --batch_size=8 $(T4_EXTRA) $(EXTRA)
+
+bench-latency-t4: deps $(TOKENIZER_FILE)
+	@echo "Running memory-friendly latency analysis benchmark..."
+	CUDA_VISIBLE_DEVICES=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+		$(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+		--architecture=llama --variant=$(LLAMA_VARIANT) \
+		--tokenizer="$(TOKENIZER)" \
+		--seq_len=256 --batch_size=1 $(T4_EXTRA) $(EXTRA)
+
+# Run all attention runtime and memory benchmarks for plotting at specific sequence lengths
+attention-benchmarks: deps $(TOKENIZER_FILE)
+	@rm -f attention_runtime_vs_seqlen.csv attention_memory_vs_seqlen.csv
+	@for SEQ in 128 256 512 1024 2048 4096 8192; do \
+		echo "Running runtime vs sequence length ($$SEQ, paged and non-paged)..."; \
+		CUDA_VISIBLE_DEVICES=0 $(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+			--architecture=llama --variant=$(LLAMA_VARIANT) \
+			--tokenizer="$(TOKENIZER)" \
+			--seq_len=$$SEQ \
+			--benchmark_mode=runtime_vs_seqlen \
+			--output_csv=attention_runtime_vs_seqlen.csv; \
+	done
+	@for SEQ in 128 256 512 1024 2048 4096 8192; do \
+		echo "Running memory vs sequence length ($$SEQ, paged and non-paged)..."; \
+		CUDA_VISIBLE_DEVICES=0 $(VENV_DIR)/bin/python $(BENCH_SCRIPT) \
+			--architecture=llama --variant=$(LLAMA_VARIANT) \
+			--tokenizer="$(TOKENIZER)" \
+			--seq_len=$$SEQ \
+			--benchmark_mode=memory_vs_seqlen \
+			--output_csv=attention_memory_vs_seqlen.csv; \
+	done
+
+# Plot the results
+plot-attention-benchmarks:
+	$(VENV_DIR)/bin/python scripts/plot_attention_benchmarks.py attention_runtime_vs_seqlen.csv attention_memory_vs_seqlen.csv
 

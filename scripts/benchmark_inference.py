@@ -5,6 +5,8 @@ import random
 import statistics
 import timeit
 import threading
+import time
+import csv
 
 import numpy as np
 import torch
@@ -153,6 +155,19 @@ parser.add_argument(
     type=int,
     default=4,
     help="Number of concurrent requests for throughput profiling."
+)
+parser.add_argument(
+    "--output_csv",
+    type=str,
+    default=None,
+    help="Path to output CSV file for benchmark results."
+)
+parser.add_argument(
+    "--benchmark_mode",
+    type=str,
+    default=None,
+    choices=[None, "runtime_vs_seqlen", "memory_vs_seqlen"],
+    help="Special mode for plotting: run runtime or memory vs sequence length for both paged and non-paged."
 )
 
 args = parser.parse_args()
@@ -445,3 +460,242 @@ def profile_throughput(model, tokenizer, device, batch_size, seq_len, num_reques
 # Top-level call for throughput profiling
 if args.profile_throughput:
     profile_throughput(model, tokenizer, device, batch_size=BATCH_SIZE, seq_len=SEQ_LEN, num_requests=args.num_requests)
+
+def benchmark_throughput_vs_seqlen(model, tokenizer, device, batch_size, max_seq_len=4096, step=512):
+    """Benchmark throughput at different sequence lengths with max sustainable batch size."""
+    seq_lengths = range(512, max_seq_len + 1, step)
+    results = []
+    
+    for seq_len in seq_lengths:
+        # Generate input
+        ids = torch.randint(tokenizer.vocab_size(), (batch_size, seq_len), device=device, dtype=torch.long)
+        
+        # Warmup
+        for _ in range(3):
+            model.forward(ids, use_cache=True)
+        
+        # Measure throughput
+        start_time = time.time()
+        num_iterations = 10
+        for _ in range(num_iterations):
+            model.forward(ids, use_cache=True)
+        end_time = time.time()
+        
+        # Calculate tokens per second
+        total_tokens = batch_size * seq_len * num_iterations
+        tokens_per_second = total_tokens / (end_time - start_time)
+        
+        results.append({
+            'seq_len': seq_len,
+            'throughput': tokens_per_second,
+            'batch_size': batch_size
+        })
+        
+    return results
+
+def benchmark_throughput_vs_batchsize(model, tokenizer, device, seq_len, max_batch_size=32, step=2):
+    """Benchmark throughput at different batch sizes with fixed sequence length."""
+    batch_sizes = range(1, max_batch_size + 1, step)
+    results = []
+    
+    for batch_size in batch_sizes:
+        # Generate input
+        ids = torch.randint(tokenizer.vocab_size(), (batch_size, seq_len), device=device, dtype=torch.long)
+        
+        # Warmup
+        for _ in range(3):
+            model.forward(ids, use_cache=True)
+        
+        # Measure throughput
+        start_time = time.time()
+        num_iterations = 10
+        for _ in range(num_iterations):
+            model.forward(ids, use_cache=True)
+        end_time = time.time()
+        
+        # Calculate tokens per second
+        total_tokens = batch_size * seq_len * num_iterations
+        tokens_per_second = total_tokens / (end_time - start_time)
+        
+        results.append({
+            'batch_size': batch_size,
+            'throughput': tokens_per_second,
+            'seq_len': seq_len
+        })
+        
+    return results
+
+def benchmark_latency(model, tokenizer, device, batch_size, seq_len, num_tokens=100):
+    """Analyze latency per token and per sequence."""
+    # Generate input
+    ids = torch.randint(tokenizer.vocab_size(), (batch_size, seq_len), device=device, dtype=torch.long)
+    
+    # Warmup
+    for _ in range(3):
+        model.forward(ids, use_cache=True)
+    
+    # Measure token generation latency
+    token_latencies = []
+    sequence_latencies = []
+    
+    for _ in range(num_tokens):
+        # Measure per-token latency
+        start_time = time.time()
+        logits, cache = model.forward(ids, use_cache=True)
+        next_token = torch.argmax(logits[:, -1, :], dim=-1)
+        end_time = time.time()
+        token_latencies.append((end_time - start_time) * 1000)  # Convert to ms
+        
+        # Update input for next token
+        ids = torch.cat([ids, next_token.unsqueeze(-1)], dim=-1)
+        
+        # Measure full sequence latency every 10 tokens
+        if len(token_latencies) % 10 == 0:
+            seq_start = time.time()
+            model.forward(ids, use_cache=True)
+            seq_end = time.time()
+            sequence_latencies.append((seq_end - seq_start) * 1000)  # Convert to ms
+    
+    return {
+        'avg_token_latency_ms': statistics.mean(token_latencies),
+        'p95_token_latency_ms': np.percentile(token_latencies, 95),
+        'avg_sequence_latency_ms': statistics.mean(sequence_latencies),
+        'p95_sequence_latency_ms': np.percentile(sequence_latencies, 95)
+    }
+
+def run_benchmarks(model, tokenizer, device, args):
+    """Run all benchmark tests."""
+    results = {}
+    
+    # Throughput vs Sequence Length
+    print("\nRunning Throughput vs Sequence Length benchmark...")
+    results['throughput_vs_seqlen'] = benchmark_throughput_vs_seqlen(
+        model, tokenizer, device, 
+        batch_size=args.batch_size,
+        max_seq_len=args.seq_len
+    )
+    
+    # Throughput vs Batch Size
+    print("\nRunning Throughput vs Batch Size benchmark...")
+    results['throughput_vs_batchsize'] = benchmark_throughput_vs_batchsize(
+        model, tokenizer, device,
+        seq_len=args.seq_len,
+        max_batch_size=args.batch_size * 4
+    )
+    
+    # Latency Analysis
+    print("\nRunning Latency Analysis benchmark...")
+    results['latency'] = benchmark_latency(
+        model, tokenizer, device,
+        batch_size=args.batch_size,
+        seq_len=args.seq_len
+    )
+    
+    return results
+
+def runtime_vs_seqlen_sweep(tokenizer, device, paged, output_csv, batch_size=1, min_seq=128, max_seq=8192, step=128):
+    """Run runtime (fwd+bwd) vs sequence length for paged/non-paged, save to CSV."""
+    import torch.nn as nn
+    import torch.optim as optim
+    results = []
+    os.environ["FMS_ATTENTION_ALGO"] = "paged" if paged else ""
+    model = models.get_model(args.architecture, args.variant, device_type=args.device_type)
+    model.train()
+    optimizer = optim.Adam(model.parameters(), lr=1e-3)
+    for seq_len in range(min_seq, max_seq+1, step):
+        ids = torch.randint(tokenizer.vocab_size(), (batch_size, seq_len), device=device, dtype=torch.long)
+        targets = torch.randint(0, model.config.vocab_size, (batch_size, seq_len), device=device)
+        # Warmup
+        for _ in range(2):
+            logits = model(ids)[0] if isinstance(model(ids), tuple) else model(ids)
+            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+            loss.backward()
+            optimizer.zero_grad()
+        # Timed run
+        torch.cuda.synchronize()
+        start = time.time()
+        logits = model(ids)[0] if isinstance(model(ids), tuple) else model(ids)
+        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1))
+        loss.backward()
+        torch.cuda.synchronize()
+        end = time.time()
+        runtime_ms = (end - start) * 1000
+        results.append({"seq_len": seq_len, "runtime_ms": runtime_ms, "paged": paged})
+    if output_csv:
+        with open(output_csv, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["seq_len", "runtime_ms", "paged"])
+            if f.tell() == 0:
+                writer.writeheader()
+            for row in results:
+                writer.writerow(row)
+    return results
+
+def memory_vs_seqlen_sweep(tokenizer, device, paged, output_csv, batch_size=1, min_seq=256, max_seq=65536, step=1024):
+    """Run memory usage vs sequence length for paged/non-paged, save to CSV."""
+    results = []
+    os.environ["FMS_ATTENTION_ALGO"] = "paged" if paged else ""
+    model = models.get_model(args.architecture, args.variant, device_type=args.device_type)
+    model.eval()
+    for seq_len in range(min_seq, max_seq+1, step):
+        ids = torch.randint(tokenizer.vocab_size(), (batch_size, seq_len), device=device, dtype=torch.long)
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        with torch.no_grad():
+            _ = model.forward(ids, use_cache=True)
+        peak_mem = torch.cuda.max_memory_allocated() / 1e9  # GB
+        results.append({"seq_len": seq_len, "memory_gb": peak_mem, "paged": paged})
+    if output_csv:
+        with open(output_csv, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["seq_len", "memory_gb", "paged"])
+            if f.tell() == 0:
+                writer.writeheader()
+            for row in results:
+                writer.writerow(row)
+    return results
+
+if __name__ == "__main__":
+    # ... existing code ...
+    
+    if args.profile_memory:
+        profile_memory(model, tokenizer, device, BATCH_SIZE, SEQ_LEN)
+    elif args.profile_throughput:
+        profile_throughput(model, tokenizer, device, BATCH_SIZE, SEQ_LEN, args.num_requests)
+    else:
+        # Run all benchmarks
+        results = run_benchmarks(model, tokenizer, device, args)
+        
+        # Print results
+        print("\nBenchmark Results:")
+        print("\nThroughput vs Sequence Length:")
+        for r in results['throughput_vs_seqlen']:
+            print(f"Seq Len: {r['seq_len']}, Throughput: {r['throughput']:.2f} tokens/sec")
+            
+        print("\nThroughput vs Batch Size:")
+        for r in results['throughput_vs_batchsize']:
+            print(f"Batch Size: {r['batch_size']}, Throughput: {r['throughput']:.2f} tokens/sec")
+            
+        print("\nLatency Analysis:")
+        print(f"Average Token Latency: {results['latency']['avg_token_latency_ms']:.2f} ms")
+        print(f"P95 Token Latency: {results['latency']['p95_token_latency_ms']:.2f} ms")
+        print(f"Average Sequence Latency: {results['latency']['avg_sequence_latency_ms']:.2f} ms")
+        print(f"P95 Sequence Latency: {results['latency']['p95_sequence_latency_ms']:.2f} ms")
+
+    if args.benchmark_mode == "runtime_vs_seqlen":
+        # Clear file if exists
+        if args.output_csv and os.path.exists(args.output_csv):
+            os.remove(args.output_csv)
+        print("Running runtime vs sequence length (non-paged)...")
+        runtime_vs_seqlen_sweep(tokenizer, device, paged=False, output_csv=args.output_csv)
+        print("Running runtime vs sequence length (paged)...")
+        runtime_vs_seqlen_sweep(tokenizer, device, paged=True, output_csv=args.output_csv)
+        print(f"Results written to {args.output_csv}")
+        exit(0)
+    if args.benchmark_mode == "memory_vs_seqlen":
+        if args.output_csv and os.path.exists(args.output_csv):
+            os.remove(args.output_csv)
+        print("Running memory vs sequence length (non-paged)...")
+        memory_vs_seqlen_sweep(tokenizer, device, paged=False, output_csv=args.output_csv)
+        print("Running memory vs sequence length (paged)...")
+        memory_vs_seqlen_sweep(tokenizer, device, paged=True, output_csv=args.output_csv)
+        print(f"Results written to {args.output_csv}")
+        exit(0)
